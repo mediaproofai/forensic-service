@@ -1,0 +1,11 @@
+{
+  "name": "forensic-service",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "exifr": "^8.0.0",
+    "node-fetch": "^2.6.7",
+    "sharp": "^0.32.0",
+    "buffer": "^6.0.3"
+  }
+}
