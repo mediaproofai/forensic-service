@@ -1,6 +1,12 @@
 // forensic-service/api/analyze.js
 // Vercel Serverless function. POST JSON { filename, mimetype, data (base64) OR url }.
 // Returns: { score: float (0..1), details: { pHash, exif, hf, ela_base64? } }
+const workerSecret = process.env.WORKER_SECRET;
+const incoming = req.headers["x-worker-secret"];
+
+if (!incoming || incoming !== workerSecret) {
+  return res.status(401).json({ error: "Unauthorized" });
+}
 
 const fetch = require('node-fetch');
 const exifr = require('exifr');
