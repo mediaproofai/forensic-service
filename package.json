@@ -1,11 +1,12 @@
 {
-  "name": "forensic-service",
+  "name": "mediaproof-forensic",
   "version": "1.0.0",
-  "private": true,
-  "dependencies": {
-    "exifr": "^7.1.3",
-    "node-fetch": "^2.6.7",
-    "sharp": "^0.32.0",
-    "buffer": "^6.0.3"
+  "main": "api/analyze.js",
+  "scripts": {
+    "start": "node api/analyze.js"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
+
