@@ -6,7 +6,7 @@
     "start": "node api/analyze.js"
   },
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }
 
