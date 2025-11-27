@@ -1,12 +1,9 @@
 {
-  "name": "mediaproof-forensic",
+  "name": "forensic-service",
   "version": "1.0.0",
-  "main": "api/analyze.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node api/analyze.js"
   },
-  "engines": {
-    "node": "24.x"
-  }
+  "dependencies": {}
 }
-
