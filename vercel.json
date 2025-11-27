@@ -1,10 +1,11 @@
 {
-  "version": 2,
+  "version": 3,
   "functions": {
     "api/*.js": {
       "runtime": "nodejs20",
-      "maxDuration": 30,
-      "memory": 512
+      "memory": 512,
+      "maxDuration": 30
     }
   }
 }
+
