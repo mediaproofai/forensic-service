@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "api/*.js": {
-      "runtime": "nodejs24.x",
+      "runtime": "now-php@1.0.0",
       "maxDuration": 30,
       "memory": 512
     }
