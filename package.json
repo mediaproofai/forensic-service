@@ -1,8 +1,10 @@
 {
-  "name": "forensic-service",
+  "name": "mediaproof-forensic",
   "version": "1.0.0",
-  "main": "api/analyze.js",
-  "type": "commonjs",
-  "license": "MIT"
+  "type": "module",
+  "dependencies": {
+    "node-fetch": "3.3.2",
+    "form-data": "4.0.0",
+    "file-type": "18.4.0"
+  }
 }
-
