@@ -1,10 +1,6 @@
 {
-  "name": "mediaproof-forensic",
-  "version": "1.0.0",
+  "name": "mediaproof-<service-name>",
   "type": "module",
-  "dependencies": {
-    "node": "22.x",
-    "form-data": "4.0.0",
-    "file-type": "18.4.0"
-  }
+  "engines": { "node": "24.x" },
+  "dependencies": {}
 }
