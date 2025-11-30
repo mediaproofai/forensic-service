@@ -1,309 +1,260 @@
-// api/analyze.js
-// Forensic microservice handler (Node serverless, works with @vercel/node)
-// Supports JSON { data: "<base64>" } or { url }, or raw binary body.
-// Optional: HUGGINGFACE_API_KEY to call an image model for inference.
-// Optional: ADMIN_API_KEYS env var (comma-separated) to protect endpoints.
+// api/analyze.js  (Forensic microservice)
+// Paste into your forensic-service repo under /api/analyze.js
+// Node.js serverless (CommonJS). No special runtime config.
 
-const DEFAULT_MAX_BYTES = 14 * 1024 * 1024; // 14 MB
+const crypto = require("crypto");
+const { URL } = require("url");
+const https = require("https");
 
-// ---------- Helpers ----------
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,HEAD,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, x-worker-secret"
-  };
-}
+const MAX_BYTES = 12 * 1024 * 1024; // 12 MB
 
+// Helpers
 function jsonResponse(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...corsHeaders() });
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, x-worker-secret");
+  res.statusCode = status;
   res.end(JSON.stringify(body, null, 2));
 }
 
 function jsonError(res, status, message, detail) {
   const out = { ok: false, error: message };
-  if (detail) out.detail = detail;
+  if (detail) out.detail = String(detail);
   return jsonResponse(res, status, out);
 }
 
-function parseBase64(b64) {
+function sha256Base64(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function simpleEntropyEstimate(buffer) {
   try {
-    // strip data: prefix
-    const m = b64.match(/^data:(.+);base64,(.*)$/);
-    if (m) b64 = m[2];
-    return Buffer.from(b64, "base64");
-  } catch (e) {
-    return null;
-  }
-}
-
-function detectMimeFromBuffer(buf) {
-  if (!buf || buf.length < 12) return "application/octet-stream";
-  const sig = buf.slice(0, 12).toString("hex").toLowerCase();
-  // JPEG FF D8
-  if (buf[0] === 0xff && buf[1] === 0xd8) return "image/jpeg";
-  // PNG 89 50 4E 47 0D 0A 1A 0A
-  if (sig.startsWith("89504e470d0a1a0a")) return "image/png";
-  // GIF 47 49 46
-  if (buf.slice(0, 3).toString() === "GIF") return "image/gif";
-  // PDF %PDF
-  if (buf.slice(0, 4).toString() === "%PDF") return "application/pdf";
-  // WAV "RIFF" ... "WAVE"
-  if (buf.slice(0, 4).toString() === "RIFF" && buf.slice(8, 12).toString() === "WAVE") return "audio/wav";
-  // MP3: frame sync or ID3
-  if (buf.slice(0, 3).toString() === "ID3" || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) return "audio/mpeg";
-  // fallback
-  return "application/octet-stream";
-}
-
-function entropyEstimate(buf) {
-  if (!buf || buf.length === 0) return 0;
-  const freq = new Uint32Array(256);
-  for (let i = 0; i < buf.length; i++) freq[buf[i]]++;
-  let sum = 0;
-  for (let i = 0; i < 256; i++) {
-    if (!freq[i]) continue;
-    const p = freq[i] / buf.length;
-    sum += -p * Math.log2(p);
-  }
-  return Number((sum / 8).toFixed(3)); // normalized 0..1
-}
-
-// simple pHash stub (not cryptographic) - returns hex string
-function pHashStub(buf) {
-  try {
-    let s = 2166136261 >>> 0;
-    for (let i = 0; i < Math.min(buf.length, 4096); i += 4) {
-      s = Math.imul(s ^ buf[i], 16777619) >>> 0;
-    }
-    return ("00000000" + (s >>> 0).toString(16)).slice(-8);
-  } catch (e) {
-    return null;
-  }
-}
-
-// Extract JPEG quantization tables (if JPEG) - returns array of tables (approx)
-function extractJpegQuantTables(buf) {
-  try {
-    if (!buf || buf.length < 4) return null;
-    if (!(buf[0] === 0xff && buf[1] === 0xd8)) return null;
-    let i = 2;
-    const tables = [];
-    while (i < buf.length) {
-      if (buf[i] !== 0xff) break;
-      const marker = buf[i + 1];
-      i += 2;
-      if (marker === 0xda) break; // start of scan
-      const len = buf.readUInt16BE(i);
-      if (marker === 0xdb) {
-        // DQT
-        let j = i + 2;
-        while (j < i + len) {
-          const pqTq = buf[j++];
-          const pq = pqTq >> 4; // 0: 8-bit, 1:16-bit
-          const tq = pqTq & 0x0f;
-          const table = [];
-          const entries = pq === 0 ? 64 : 128;
-          for (let e = 0; e < 64; e++) {
-            const v = pq === 0 ? buf[j++] : buf.readUInt16BE(j); j += pq === 0 ? 0 : 2;
-            table.push(v);
-          }
-          tables.push({ id: tq, valuesSample: table.slice(0, 8) });
-        }
+    const freq = new Uint32Array(256);
+    for (let i = 0; i < buffer.length; i++) freq[buffer[i]]++;
+    let sum = 0;
+    for (let i = 0; i < 256; i++) {
+      if (freq[i] > 0) {
+        const p = freq[i] / buffer.length;
+        sum += -p * Math.log2(p);
       }
-      i += len;
     }
-    return tables.length ? tables : null;
+    return Math.round((sum / 8) * 100) / 100;
   } catch (e) {
-    return null;
+    return 0;
   }
 }
 
-// safe fetch wrapper with timeout
-async function safeFetch(url, opts = {}) {
-  try {
+function base64FromBuffer(buf) {
+  return Buffer.from(buf).toString("base64");
+}
+
+async function safeFetchJson(url, opts = {}, timeout = 15_000) {
+  // uses global fetch if available (Vercel Node has fetch), fallback to https.request
+  if (typeof fetch === "function") {
     const controller = new AbortController();
-    const timeout = opts.timeout || 15000;
-    const t = setTimeout(() => controller.abort(), timeout);
-    const r = await fetch(url, { ...opts, signal: controller.signal });
-    clearTimeout(t);
-    return r;
-  } catch (e) {
-    return null;
-  }
-}
-
-// Call Hugging Face inference model (image); returns parsed JSON or null
-async function callHuggingFaceImage(buffer, mimeType) {
-  try {
-    const key = String(process.env.HUGGINGFACE_API_KEY || "").trim();
-    if (!key) return null;
-    // replace with your model id for manipulation detection
-    const MODEL = process.env.HF_IMAGE_MODEL || "openmmlab/detected-image-manipulation";
-    const url = `https://api-inference.huggingface.co/models/${MODEL}`;
-    // Try sending raw bytes first
-    let resp = await safeFetch(url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": mimeType || "application/octet-stream" },
-      body: buffer,
-      timeout: 20000
-    });
-    if (!resp || !resp.ok) {
-      // fallback: base64 in JSON
-      const base64 = buffer.toString("base64");
-      resp = await safeFetch(url, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ inputs: base64 }),
-        timeout: 30000
-      });
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const resp = await fetch(url, { ...opts, signal: controller.signal });
+      clearTimeout(timer);
+      const txt = await resp.text().catch(() => "");
+      try {
+        return { ok: resp.ok, status: resp.status, json: txt ? JSON.parse(txt) : null, text: txt };
+      } catch {
+        return { ok: resp.ok, status: resp.status, json: null, text: txt };
+      }
+    } catch (e) {
+      return { ok: false, error: String(e) };
     }
-    if (!resp) return null;
-    const text = await resp.text().catch(() => null);
-    try { return text ? JSON.parse(text) : null; } catch (e) { return { raw: text }; }
-  } catch (e) {
-    return null;
+  } else {
+    // fallback minimal impl (rare on Vercel)
+    return { ok: false, error: "fetch unavailable" };
   }
 }
 
-// ---------- Auth ----------
-function isAuthRequired() {
-  try {
-    const raw = String(process.env.ADMIN_API_KEYS || "").trim();
-    return raw.length > 0;
-  } catch (e) { return false; }
-}
-function validateApiKey(key) {
-  if (!key) return false;
-  const raw = String(process.env.ADMIN_API_KEYS || "").trim();
-  const allowed = raw.split(",").map(s => s.trim()).filter(Boolean);
-  return allowed.includes(key);
+// Call configured external forensic microservice (if set)
+async function callExternalForensic(payload) {
+  const url = String(process.env.FORENSIC_BACKEND_URL || "").trim();
+  if (!url) return null;
+  const headers = { "Content-Type": "application/json" };
+  const workerSecret = String(process.env.WORKER_SECRET || "").trim();
+  if (workerSecret) headers["X-Worker-Secret"] = workerSecret;
+  const resp = await safeFetchJson(url, { method: "POST", headers, body: JSON.stringify(payload) }, 20000);
+  return resp;
 }
 
-// ---------- Handler ----------
+async function readRequestBody(req) {
+  // If request has body parsed by platform, prefer it
+  if (req.body) return req.body;
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let len = 0;
+    req.on("data", (d) => {
+      chunks.push(d);
+      len += d.length;
+      if (len > MAX_BYTES + 1024) {
+        // too large - stop reading
+        reject(new Error("Payload too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks, len)));
+    req.on("error", reject);
+  });
+}
+
 module.exports = async function handler(req, res) {
   try {
-    // CORS preflight
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, corsHeaders());
-      res.end();
-      return;
-    }
+    if (req.method === "OPTIONS") return jsonResponse(res, 204, null);
+    if (req.method !== "POST" && req.method !== "GET") return jsonError(res, 405, "Only POST allowed");
 
-    if (isAuthRequired()) {
-      const key = req.headers["x-api-key"] || req.headers["authorization"];
-      if (!validateApiKey(key)) return jsonError(res, 401, "Unauthorized: missing or invalid x-api-key");
-    }
-
+    // Health check
     if (req.method === "GET") {
-      return jsonResponse(res, 200, { ok: true, service: "MediaProof Forensic", version: "enterprise-1.0", timestamp: new Date().toISOString() });
+      return jsonResponse(res, 200, { ok: true, service: "forensic-service", version: "enterprise-1.0" });
     }
 
-    if (req.method !== "POST") return jsonError(res, 405, "Only POST allowed");
+    const contentType = (req.headers["content-type"] || "").toLowerCase();
 
-    // Read body. Support JSON (base64/url), raw binary. Multipart not supported here (mention busboy).
-    let buf = null;
-    let contentType = (req.headers["content-type"] || "").toLowerCase();
+    // Parse input:
+    // - application/json { data: "<base64>" } or { url: "https://..." }
+    // - raw binary body
+    let buffer = null;
+    let filename = `upload-${Date.now()}`;
+    let mimetype = "application/octet-stream";
 
-    // If @vercel/node, req.body may already be parsed if small.
-    if (req.body && typeof req.body !== "string" && Buffer.isBuffer(req.body)) {
-      buf = req.body;
-    } else if (contentType.includes("application/json")) {
-      // body parsed by platform or can be read
-      let body = req.body;
-      if (!body) {
-        // read raw
-        body = await new Promise((resolve) => {
-          let d = "";
-          req.on("data", c => d += c);
-          req.on("end", () => resolve(d ? JSON.parse(d) : {}));
-          req.on("error", () => resolve({}));
-        }).catch(() => ({}));
+    if (contentType.includes("application/json")) {
+      const raw = await readRequestBody(req);
+      let body = raw;
+      try {
+        if (Buffer.isBuffer(raw)) body = JSON.parse(raw.toString("utf8"));
+      } catch (e) {
+        return jsonError(res, 400, "Invalid JSON body", e.message);
       }
-      if (body.data) {
-        buf = parseBase64(String(body.data));
-        contentType = body.mimetype || contentType || detectMimeFromBuffer(buf);
-      } else if (body.url) {
-        const fetched = await safeFetch(String(body.url));
-        if (!fetched || !fetched.ok) return jsonError(res, 400, "Failed to fetch remote url");
-        const ab = await fetched.arrayBuffer().catch(() => null);
-        if (!ab) return jsonError(res, 400, "Failed to read remote content");
-        buf = Buffer.from(ab);
-        contentType = fetched.headers.get("content-type") || detectMimeFromBuffer(buf);
+      if (!body) return jsonError(res, 400, "Empty JSON body");
+      if (body.url) {
+        // fetch remote
+        const fetched = await safeFetchJson(String(body.url), { method: "GET" }, 20000);
+        if (!fetched.ok) return jsonError(res, 400, "Failed to fetch remote URL", fetched.error || fetched.status);
+        // fetched.text may be string; if binary needed, re-fetch using fetch binary in Node fetch scenario
+        // Use platform fetch to get arrayBuffer if available
+        if (typeof fetch === "function") {
+          try {
+            const r2 = await fetch(body.url, { method: "GET" });
+            if (!r2.ok) return jsonError(res, 400, "Remote fetch failed", r2.status);
+            const ab = await r2.arrayBuffer().catch(() => null);
+            if (!ab) return jsonError(res, 400, "Failed to read remote binary");
+            buffer = Buffer.from(ab);
+            mimetype = r2.headers.get("content-type") || mimetype;
+            try {
+              filename = (new URL(body.url)).pathname.split("/").pop() || filename;
+            } catch {}
+          } catch (e) {
+            return jsonError(res, 400, "Remote fetch error", String(e));
+          }
+        } else {
+          return jsonError(res, 500, "Server fetch not available");
+        }
+      } else if (body.data) {
+        try {
+          buffer = Buffer.from(String(body.data), "base64");
+        } catch (e) {
+          return jsonError(res, 400, "Invalid base64 data");
+        }
+        filename = body.filename || filename;
+        mimetype = body.mimetype || mimetype;
       } else {
         return jsonError(res, 400, "JSON must include `data` (base64) or `url`");
       }
-    } else if (contentType.includes("multipart/form-data")) {
-      // multipart parsing requires busboy/formidable; not installed by default.
-      return jsonError(res, 400, "multipart/form-data not supported in this build. Send JSON with base64 or a public url. To enable multipart, install busboy and update handler.");
     } else {
       // raw binary
-      const chunks = [];
-      await new Promise((resolve) => {
-        req.on("data", (c) => chunks.push(c));
-        req.on("end", resolve);
-        req.on("error", resolve);
-      });
-      if (chunks.length) buf = Buffer.concat(chunks);
-      contentType = contentType || detectMimeFromBuffer(buf);
+      const raw = await readRequestBody(req).catch((e) => null);
+      if (!raw || (raw.length === 0)) return jsonError(res, 400, "No file provided");
+      buffer = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      mimetype = contentType || mimetype;
     }
 
-    if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) return jsonError(res, 400, "No file data found");
-    if (buf.length > (parseInt(process.env.MAX_BYTES || DEFAULT_MAX_BYTES))) return jsonError(res, 413, "File too large");
+    if (!buffer) return jsonError(res, 400, "No file data found");
+    if (buffer.length > MAX_BYTES) return jsonError(res, 413, `File too large (max ${MAX_BYTES} bytes)`);
 
     // Basic metadata
     const metadata = {
-      byteLength: buf.length,
-      mimeType: contentType || detectMimeFromBuffer(buf),
-      filename: (req.body && req.body.filename) || null,
-      sha256: require("crypto").createHash("sha256").update(buf).digest("hex").slice(0, 16)
+      filename,
+      mimetype,
+      size: buffer.length,
+      sha256: sha256Base64(buffer)
     };
 
     // Heuristics
     const heuristics = {
-      entropy: entropyEstimate(buf),
-      pHash: pHashStub(buf),
-      mimeGuess: detectMimeFromBuffer(buf),
-      jpegQuantTables: null
+      entropy: simpleEntropyEstimate(buffer),
+      phash: (function phashStub(buf) {
+        // deterministic stub - not a real pHash; microservices should compute real pHash
+        let s = 0;
+        for (let i = 0; i < Math.min(64, buf.length); i++) s = (s * 31 + buf[i]) >>> 0;
+        return s.toString(16).padStart(8, "0");
+      })(buffer)
     };
 
-    if ((metadata.mimeType || "").startsWith("image/") || metadata.mimeType === "image/jpeg") {
-      heuristics.jpegQuantTables = extractJpegQuantTables(buf) || null;
+    // Quick HF-style call (if available)
+    let hf = { note: "no hf key configured" };
+    try {
+      const hfKey = String(process.env.HUGGINGFACE_API_KEY || "").trim();
+      if (hfKey) {
+        // Try safe API call: send base64 in JSON
+        const MODEL = "openmmlab/detected-image-manipulation"; // placeholder model id
+        const url = `https://api-inference.huggingface.co/models/${MODEL}`;
+        const resp = await safeFetchJson(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${hfKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ inputs: base64FromBuffer(buffer) })
+        }, 20000);
+        if (resp && resp.ok) hf = resp.json || { raw: resp.text };
+        else hf = { error: "hf failure", status: resp && resp.status, detail: resp && resp.error };
+      }
+    } catch (e) {
+      hf = { error: "hf error", detail: String(e) };
     }
 
-    // Optional: call Hugging Face image model if configured
-    let hf = null;
-    if ((metadata.mimeType || "").startsWith("image/")) {
-      hf = await callHuggingFaceImage(buf, metadata.mimeType).catch(() => null);
+    // Fire external forensic microservice (if configured) for deep analysis
+    let external = null;
+    try {
+      const externalPayload = { filename, mimetype, sha256: metadata.sha256, data: base64FromBuffer(buffer) };
+      const extResp = await callExternalForensic(externalPayload);
+      external = extResp;
+    } catch (e) {
+      external = { error: String(e) };
     }
 
-    // Composite trust scoring (example)
-    const aiScore = Number((hf && (hf.score ?? hf.probability)) || 0);
-    const composite = Math.round(((aiScore * 0.7) + (heuristics.entropy * 0.25)) * 100) / 100;
-
-    const result = {
+    // Compose report
+    const report = {
+      ok: true,
       metadata,
       heuristics,
       hf,
-      trustScore: { composite, breakdown: { ai: aiScore, entropy: heuristics.entropy } },
-      receivedAt: new Date().toISOString()
+      external,
+      processedAt: new Date().toISOString()
     };
 
     // Optional fire-and-forget sink
     try {
       const sink = String(process.env.STORAGE_WEBHOOK_URL || "").trim();
       if (sink) {
-        fetch(sink, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "forensic", metadata, result, timestamp: new Date().toISOString() })
-        }).catch(() => {});
+        (async () => {
+          try {
+            await fetch(sink, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ type: "forensic", metadata, report, timestamp: new Date().toISOString() })
+            });
+          } catch (_) {}
+        })();
       }
-    } catch (e) {}
+    } catch (_) {}
 
-    return jsonResponse(res, 200, { ok: true, filename: metadata.filename || "upload", result });
+    return jsonResponse(res, 200, report);
   } catch (err) {
-    console.error("analyze error:", err);
-    return jsonError(res, 500, "internal", String(err));
+    console.error("forensic/analyze error:", err && err.stack ? err.stack : String(err));
+    return jsonError(res, 500, "Internal Server Error", String(err));
   }
 };
