@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
-    "node": "22.x"
+    "node": "22.x",
     "form-data": "4.0.0",
     "file-type": "18.4.0"
   }
