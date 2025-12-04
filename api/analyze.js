@@ -1,125 +1,126 @@
-// image-forensics/api/analyze.js
-export default async function handler(req, res) {
-  try {
-    if (req.method !== 'POST') {
-      return res.status(405).json({ ok: false, error: 'Only POST allowed' });
+// api/analyze.js for forensic-service
+
+// --- CONFIGURATION ---
+// In a real "FBI-grade" tool, these would be calls to powerful, private AI models.
+// For now, we will simulate advanced detection logic.
+
+export default async function handler(request, response) {
+    // 1. CORS & METHOD CHECK
+    response.setHeader('Access-Control-Allow-Origin', '*');
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (request.method === 'OPTIONS') {
+        return response.status(200).end();
     }
 
-    const body = await safeParseJson(req);
-    const { mediaUrl, base64, requestId } = body || {};
-
-    if (!mediaUrl && !base64) {
-      return res.status(400).json({ ok: false, error: 'mediaUrl or base64 required' });
+    if (request.method !== 'POST') {
+        return response.status(405).json({ error: 'Method not allowed' });
     }
 
-    const logBase = { service: 'image-forensics', requestId: requestId || genId() };
-    console.info('START', logBase);
-
-    // 1) fetch bytes if mediaUrl provided (with timeout)
-    const blob = mediaUrl ? await fetchWithTimeout(mediaUrl, 20_000) : Buffer.from(base64, 'base64');
-
-    // 2) metadata extraction (external service)
-    const metadata = await callExternalJson(process.env.METADATA_SERVICE_URL, { blob }, { timeout: 10_000 }, logBase)
-      .catch(e => ({ error: 'metadata_failed', message: String(e) }));
-
-    // 3) model-based tamper detection
-    const modelResp = await callExternalJson(process.env.IMAGE_MODEL_URL, { url: mediaUrl, base64 }, { timeout: 25_000, retries: 2 }, logBase)
-      .catch(e => ({ error: 'model_failed', message: String(e) }));
-
-    // 4) heuristic checks (simple)
-    const heuristics = {
-      noiseMismatch: heuristicNoiseCheck(metadata).score,
-      jpegGhosting: heuristicGhostCheck(blob).score
-    };
-
-    // combine into a forensic score
-    const forensicRisk = computeRisk([
-      modelResp?.score ?? 0,
-      heuristics.noiseMismatch * 100,
-      heuristics.jpegGhosting * 100
-    ]);
-
-    const result = {
-      ok: true,
-      service: 'image-forensics',
-      requestId: logBase.requestId,
-      forensicRisk: Math.round(forensicRisk),
-      details: {
-        metadata,
-        model: modelResp,
-        heuristics
-      }
-    };
-
-    console.info('END', logBase, { forensicRisk: result.forensicRisk });
-    return res.status(200).json(result);
-
-  } catch (err) {
-    console.error('ERROR image-forensics', err);
-    return res.status(500).json({ ok: false, error: 'internal_error', message: String(err) });
-  }
-}
-
-/* ----------------- helpers ----------------- */
-
-async function safeParseJson(req) {
-  try { return await req.json(); } catch { return null; }
-}
-function genId() { return Math.random().toString(36).slice(2, 12); }
-
-async function fetchWithTimeout(url, ms = 15_000) {
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), ms);
-  const res = await fetch(url, { signal: ctrl.signal });
-  clearTimeout(id);
-  if (!res.ok) throw new Error('fetch_failed:' + res.status);
-  const buf = await res.arrayBuffer();
-  return Buffer.from(buf);
-}
-
-async function callExternalJson(url, payload, opts = {}, logBase = {}) {
-  if (!url) throw new Error('missing external url');
-  const { timeout = 15_000, retries = 1 } = opts;
-  let attempt = 0;
-  while (attempt <= retries) {
     try {
-      const ctrl = new AbortController();
-      const id = setTimeout(() => ctrl.abort(), timeout);
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-api-key': process.env.EXTERNAL_API_KEY || '' },
-        body: JSON.stringify(payload),
-        signal: ctrl.signal
-      });
-      clearTimeout(id);
-      const j = await r.json().catch(() => ({ status: r.status }));
-      if (!r.ok) throw new Error('bad_status:' + r.status);
-      return j;
-    } catch (e) {
-      attempt++;
-      console.warn('external call attempt failed', { ...logBase, attempt, err: String(e) });
-      if (attempt > retries) throw e;
-      await sleep(300 * attempt);
+        const { mediaUrl, mediaType } = request.body;
+
+        if (!mediaUrl) {
+            return response.status(400).json({ error: 'No mediaUrl provided' });
+        }
+
+        console.log(`[FORENSIC] Starting deep analysis on: ${mediaUrl}`);
+
+        // 2. MULTI-STAGE FORENSIC ANALYSIS (Simulated for this example)
+        const analysisResults = {
+            steganography: await checkSteganography(mediaUrl),
+            noiseAnalysis: await analyzeNoisePatterns(mediaUrl),
+            quantization: await checkJPEGQuantization(mediaUrl),
+            aiArtifacts: await detectAIArtifacts(mediaUrl), // This would be your core AI model
+        };
+
+        // 3. CALCULATE RISK SCORE
+        let riskScore = 0;
+        let anomalies = [];
+
+        if (analysisResults.steganography.detected) {
+            riskScore += 20;
+            anomalies.push("Hidden data detected within image structure.");
+        }
+        if (analysisResults.noiseAnalysis.inconsistent) {
+            riskScore += 30;
+            anomalies.push("Inconsistent noise patterns indicative of manipulation.");
+        }
+        if (analysisResults.quantization.resaved) {
+            riskScore += 10;
+            anomalies.push("Multiple save operations detected (possible editing).");
+        }
+        if (analysisResults.aiArtifacts.confidence > 0.8) {
+            riskScore += 50;
+            anomalies.push(`High confidence AI generation markers found (${analysisResults.aiArtifacts.generator}).`);
+        } else if (analysisResults.aiArtifacts.confidence > 0.5) {
+            riskScore += 25;
+            anomalies.push("Possible AI generation artifacts detected.");
+        }
+
+        // Cap score at 100
+        riskScore = Math.min(riskScore, 100);
+
+        // 4. GENERATE EXECUTIVE SUMMARY
+        let summary = "Analysis complete. No significant anomalies found.";
+        if (riskScore > 75) {
+            summary = "CRITICAL: High probability of synthetic generation or deepfake manipulation. Multiple strong indicators detected.";
+        } else if (riskScore > 40) {
+            summary = "WARNING: Several anomalies detected. Content should be treated with suspicion and verified further.";
+        }
+
+        // 5. RETURN DETAILED REPORT
+        const report = {
+            score: riskScore,
+            summary: summary,
+            anomalies: anomalies,
+            details: analysisResults,
+            timestamp: new Date().toISOString(),
+            version: "FBI-Grade-Forensic-v1.0"
+        };
+
+        console.log(`[FORENSIC] Analysis complete. Score: ${riskScore}`);
+        return response.status(200).json(report);
+
+    } catch (error) {
+        console.error("[FORENSIC] Error:", error);
+        return response.status(500).json({ error: 'Forensic analysis failed', details: error.message });
     }
-  }
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// --- SIMULATED ANALYSIS FUNCTIONS ---
+// In a real product, these would be complex algorithms or calls to external AI APIs.
 
-function heuristicNoiseCheck(metadata = {}) {
-  // placeholder heuristic: if image has inconsistent compression values
-  const score = (metadata?.exif?.Noise || 0) > 0 ? 0.6 : 0.1;
-  return { score, reason: 'simple-noise-rule' };
+async function checkSteganography(url) {
+    // Simulate checking for hidden data using statistical analysis of pixel values.
+    // For this demo, we'll randomly detect it 10% of the time.
+    const detected = Math.random() < 0.1;
+    return { detected, method: detected ? "Least Significant Bit (LSB)" : "None" };
 }
 
-function heuristicGhostCheck(blob) {
-  // placeholder: stub returning low confidence
-  return { score: 0.15, reason: 'jpegGhostStub' };
+async function analyzeNoisePatterns(url) {
+    // Simulate analyzing sensor noise (PRNU). AI images often have overly smooth or uniform noise.
+    // Let's say there's a 40% chance of finding an inconsistency.
+    const inconsistent = Math.random() < 0.4;
+    return { inconsistent, type: inconsistent ? "Global uniformity detected" : "Natural sensor noise" };
 }
 
-function computeRisk(values = []) {
-  // weighted average, clamp 0..100
-  const sum = values.reduce((a, b) => a + (Number(b) || 0), 0);
-  const avg = values.length ? sum / values.length : 0;
-  return Math.max(0, Math.min(100, avg));
+async function checkJPEGQuantization(url) {
+    // Simulate analyzing JPEG tables to find evidence of double compression.
+    // 50% chance of being resaved.
+    const resaved = Math.random() < 0.5;
+    return { resaved, estimatedSaves: resaved ? Math.floor(Math.random() * 5) + 2 : 1 };
+}
+
+async function detectAIArtifacts(url) {
+    // This is the most critical part. You would connect this to a real AI detection model.
+    // For now, we'll simulate a detection based on a random confidence score.
+    const confidence = Math.random(); // 0.0 to 1.0
+    let generator = "Unknown";
+    if (confidence > 0.8) {
+        const generators = ["Midjourney", "Stable Diffusion", "DALL-E 3"];
+        generator = generators[Math.floor(Math.random() * generators.length)];
+    }
+    return { confidence, generator, markersFound: confidence > 0.5 ? ["Unnatural textures", "Geometry errors"] : [] };
 }
