@@ -1,101 +1,74 @@
 import fetch from 'node-fetch';
 import exifr from 'exifr'; 
 
-// --- THE COUNCIL OF MODELS ---
-// We try these in order. If one works, we use it.
-const MODEL_QUEUE = [
+const MODELS = [
     "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector",
-    "https://api-inference.huggingface.co/models/Organika/sdxl-detector",
-    "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection" // Fallback: heavily filtered images often flag differently
+    "https://api-inference.huggingface.co/models/Organika/sdxl-detector"
 ];
+
+// Retry configuration
+const MAX_RETRIES = 5;
+const RETRY_DELAY = 3000; // 3 seconds
 
 export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        // 1. INPUT PARSING
         let body = req.body;
         if (typeof body === 'string') try { body = JSON.parse(body); } catch (e) {}
         const { mediaUrl } = body || {};
 
         if (!mediaUrl) return res.status(400).json({ error: 'No mediaUrl provided' });
 
-        // 2. FETCH IMAGE
+        // 1. Fetch Image
         const imgRes = await fetch(mediaUrl);
-        if (!imgRes.ok) throw new Error(`Image download failed: ${imgRes.status}`);
         const buffer = Buffer.from(await imgRes.arrayBuffer());
 
-        // 3. METADATA (Digital Passport)
+        // 2. Metadata Analysis (The "Camera Check")
         let metadata = {};
+        let hasCameraInfo = false;
         try {
             metadata = await exifr.parse(buffer, { tiff: true, xmp: true }).catch(() => ({}));
-        } catch (e) { metadata = { error: "Metadata extraction skipped" }; }
+            // Real photos usually have Make, Model, or ExposureTime
+            if (metadata && (metadata.Make || metadata.Model || metadata.ExposureTime)) {
+                hasCameraInfo = true;
+            }
+        } catch (e) { console.warn("Metadata fail", e); }
 
-        // 4. AI MODEL CASCADE (The "Real" Check)
+        // 3. AI Model Query (With Retry Logic)
         let aiScore = 0;
-        let usedModel = "None";
-        let debugRaw = null;
+        let modelUsed = "None";
+        let rawLog = "Init";
 
         if (process.env.HF_API_KEY) {
-            for (const model of MODEL_QUEUE) {
-                try {
-                    const hfRes = await fetch(model, {
-                        headers: { Authorization: `Bearer ${process.env.HF_API_KEY}` },
-                        method: "POST",
-                        body: buffer
-                    });
-
-                    const json = await hfRes.json();
-                    
-                    // Check for HF Errors (Model Loading, Auth Error)
-                    if (json.error) {
-                        console.warn(`Model ${model} error:`, json.error);
-                        debugRaw = json; // Store error to show you why it failed
-                        continue; // Try next model
-                    }
-
-                    // Parse Successful Response
-                    // Format: [{ label: 'artificial', score: 0.99 }]
-                    if (Array.isArray(json)) {
-                        const fake = json.find(x => 
-                            x.label.toLowerCase().includes('artific') || 
-                            x.label.toLowerCase().includes('fake') || 
-                            x.label.toLowerCase().includes('cg')
-                        );
-                        const real = json.find(x => x.label.toLowerCase().includes('real') || x.label.toLowerCase().includes('human'));
-                        
-                        // Calculate Score
-                        if (fake) aiScore = fake.score;
-                        else if (real) aiScore = 1 - real.score;
-                        
-                        usedModel = model;
-                        debugRaw = json;
-                        break; // Stop if we got a valid result
-                    }
-                } catch (e) {
-                    console.error("Model fetch error", e);
+            for (const model of MODELS) {
+                const result = await queryModelWithRetry(model, buffer, process.env.HF_API_KEY);
+                rawLog = result; // Log what happened
+                
+                if (result.success) {
+                    aiScore = result.score;
+                    modelUsed = model;
+                    break; // Stop if we got a valid answer
                 }
             }
         } else {
-            debugRaw = "MISSING_HF_API_KEY";
+            rawLog = "MISSING_HF_API_KEY";
         }
 
-        // 5. NOISE ANALYSIS (Mathematical Backup)
-        const noiseScore = calculateEntropy(buffer);
-        // AI images often have lower entropy (smoother) than real camera noise
-        const lowEntropy = noiseScore < 4.5; 
-
-        // If models failed but noise is suspicious, force a score
-        if (aiScore === 0 && lowEntropy) {
-            aiScore = 0.45; // "Suspicious" but not definitive
+        // 4. HEURISTIC OVERRIDES (The "Safety Net")
+        // If AI model failed OR returned low score, BUT there is no camera info...
+        // It's likely AI or a Screenshot. We flag it as Suspicious.
+        if (aiScore < 0.3 && !hasCameraInfo) {
+            aiScore = 0.65; // Force "Suspicious"
+            modelUsed = "Heuristic (Missing Camera Data)";
         }
 
+        // 5. Final Report
         return res.status(200).json({
-            service: "forensic-service-v6-cascade",
+            service: "forensic-service-aggressive",
             timestamp: new Date().toISOString(),
             verdict: {
                 aiProbability: aiScore,
@@ -105,13 +78,8 @@ export default async function handler(req, res) {
                 aiArtifacts: {
                     confidence: aiScore,
                     detected: aiScore > 0.5,
-                    generator: aiScore > 0.8 ? "High-Fidelity Model" : "Unknown",
-                    modelUsed: usedModel,
-                    rawResponse: debugRaw // <--- THIS WILL SHOW YOU THE ERROR IF IT FAILS
-                },
-                noiseAnalysis: {
-                    entropy: noiseScore,
-                    suspicious: lowEntropy
+                    modelUsed: modelUsed,
+                    rawResponse: rawLog // Check this in the frontend debug panel
                 },
                 metadataDump: metadata
             }
@@ -122,9 +90,37 @@ export default async function handler(req, res) {
     }
 }
 
-// Simple Entropy Calc
-function calculateEntropy(buffer) {
-    let sum = 0; 
-    for(let i=0; i<1000 && i<buffer.length; i++) sum += buffer[i];
-    return (sum / 1000) % 10; 
+// --- RETRY LOGIC HELPER ---
+async function queryModelWithRetry(url, data, key) {
+    for (let i = 0; i < MAX_RETRIES; i++) {
+        try {
+            const res = await fetch(url, {
+                headers: { Authorization: `Bearer ${key}` },
+                method: "POST",
+                body: data
+            });
+            
+            const json = await res.json();
+
+            // Case A: Model is loading (Wait and Retry)
+            if (json.error && json.error.includes("loading")) {
+                console.log(`Model loading... attempt ${i+1}/${MAX_RETRIES}`);
+                await new Promise(r => setTimeout(r, RETRY_DELAY));
+                continue;
+            }
+
+            // Case B: Success (Array)
+            if (Array.isArray(json)) {
+                const fake = json.find(x => x.label.toLowerCase().includes('artific') || x.label.toLowerCase().includes('fake'));
+                return { success: true, score: fake ? fake.score : 0, raw: json };
+            }
+
+            // Case C: Other Error
+            return { success: false, error: json };
+
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+    }
+    return { success: false, error: "Max retries exceeded" };
 }
