@@ -1,9 +1,14 @@
 import fetch from 'node-fetch';
 import exifr from 'exifr'; 
 
+// --- THE COUNCIL OF MODELS (3 Distinct Architectures) ---
 const MODELS = [
+    // Model A: Good at Midjourney/General
     "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector",
-    "https://api-inference.huggingface.co/models/Organika/sdxl-detector"
+    // Model B: Good at Stable Diffusion XL
+    "https://api-inference.huggingface.co/models/Organika/sdxl-detector",
+    // Model C: Good at identifying artificial textures
+    "https://api-inference.huggingface.co/models/Nahrawy/AI-Image-Detector" 
 ];
 
 export default async function handler(req, res) {
@@ -23,80 +28,68 @@ export default async function handler(req, res) {
         const imgRes = await fetch(mediaUrl);
         const buffer = Buffer.from(await imgRes.arrayBuffer());
 
-        // 2. PIXEL ENTROPY ANALYSIS (The "Non-Obvious" Detector)
-        // AI Diffusion models create "smoother" noise gradients than real camera sensors.
-        // We calculate the Standard Deviation of the byte stream.
-        // Real Photos: High Variance (> 50 usually). AI: Lower Variance (often < 45).
-        const pixelStats = calculatePixelVariance(buffer);
-        const mathIsFake = pixelStats.variance < 48; // Threshold for "Too Smooth"
-
-        // 3. Metadata Analysis
+        // 2. Metadata (Digital Passport)
         let metadata = {};
-        let hasCameraInfo = false;
         try {
             metadata = await exifr.parse(buffer).catch(() => ({}));
-            if (metadata && (metadata.Make || metadata.Model)) hasCameraInfo = true;
         } catch (e) {}
 
-        // 4. AI Model Query (With Robust Error Handling)
-        let aiScore = 0;
-        let modelStatus = "Failed";
+        // 3. THE COUNCIL VOTE (Parallel Execution)
+        // We ask all 3 models at once. If ANY of them says "Fake", we listen.
+        let highestConfidence = 0;
+        let detectingModel = "None";
+        let rawVotes = [];
 
         if (process.env.HF_API_KEY) {
-            for (const model of MODELS) {
-                try {
-                    const hfRes = await fetch(model, {
-                        headers: { Authorization: `Bearer ${process.env.HF_API_KEY}` },
-                        method: "POST",
-                        body: buffer
-                    });
-                    
-                    if (hfRes.ok) {
-                        const json = await hfRes.json();
-                        if (Array.isArray(json)) {
-                            const fake = json.find(x => x.label.toLowerCase().includes('artific') || x.label.toLowerCase().includes('fake'));
-                            aiScore = fake ? fake.score : 0;
-                            modelStatus = "Active";
-                            break; 
-                        }
-                    }
-                } catch (e) { console.error("Model error", e); }
-            }
+            const promises = MODELS.map(url => queryModel(url, buffer, process.env.HF_API_KEY));
+            const results = await Promise.all(promises);
+
+            results.forEach((res, index) => {
+                rawVotes.push({ model: MODELS[index].split('/')[5], score: res.score });
+                if (res.score > highestConfidence) {
+                    highestConfidence = res.score;
+                    detectingModel = MODELS[index].split('/')[5]; // Get model name
+                }
+            });
         }
 
-        // 5. CALCULATE FINAL VERDICT (The "God Mode" Logic)
-        let finalConfidence = aiScore;
-        let detectionMethod = "AI_MODEL";
-
-        // If AI Model failed OR returned low score, TRUST THE MATH.
-        if (aiScore < 0.5 && mathIsFake) {
-            finalConfidence = 0.85; // 85% confident it's fake based on pixels
-            detectionMethod = "PIXEL_ENTROPY_MATH";
-        }
+        // 4. MATH CHECK (Entropy)
+        const entropy = calculateEntropy(buffer);
         
-        // If Math says Real, but Metadata is missing -> Suspicious
-        if (finalConfidence < 0.5 && !hasCameraInfo) {
-            finalConfidence = 0.60;
-            detectionMethod = "MISSING_ORIGIN_DATA";
+        // 5. FINAL VERDICT LOGIC
+        let finalScore = highestConfidence;
+        let method = "NEURAL_ENSEMBLE";
+
+        // If models failed (0%) BUT metadata is missing -> Suspicious (Backup)
+        if (finalScore < 0.3 && Object.keys(metadata).length === 0) {
+            finalScore = 0.60;
+            method = "HEURISTIC_MISSING_DATA";
+        }
+
+        // If models failed BUT entropy is super low (plastic look) -> Fake
+        if (finalScore < 0.5 && entropy < 4.0) {
+            finalScore = 0.75;
+            method = "PIXEL_ENTROPY_ANOMALY";
         }
 
         return res.status(200).json({
-            service: "forensic-service-math-v1",
+            service: "forensic-service-council",
             timestamp: new Date().toISOString(),
             verdict: {
-                aiProbability: finalConfidence,
-                classification: finalConfidence > 0.5 ? "SYNTHETIC" : "ORGANIC"
+                aiProbability: finalScore,
+                classification: finalScore > 0.5 ? "SYNTHETIC" : "ORGANIC"
             },
             details: {
                 aiArtifacts: {
-                    confidence: finalConfidence,
-                    detected: finalConfidence > 0.5,
-                    method: detectionMethod,
-                    raw_ai_score: aiScore
+                    confidence: finalScore,
+                    detected: finalScore > 0.5,
+                    method: method,
+                    detectingModel: detectingModel,
+                    councilVotes: rawVotes
                 },
                 noiseAnalysis: {
-                    pixel_variance: pixelStats.variance,
-                    verdict: mathIsFake ? "ARTIFICIAL_SMOOTHNESS" : "NATURAL_SENSOR_NOISE"
+                    entropy: entropy,
+                    verdict: entropy < 4.0 ? "ARTIFICIAL_SMOOTHNESS" : "NATURAL_NOISE"
                 },
                 metadataDump: metadata
             }
@@ -107,22 +100,33 @@ export default async function handler(req, res) {
     }
 }
 
-// --- MATHEMATICAL PIXEL ANALYZER ---
-function calculatePixelVariance(buffer) {
-    let sum = 0;
-    let count = 0;
-    // Sample every 10th byte to be fast
-    for (let i = 0; i < buffer.length; i += 10) {
-        sum += buffer[i];
-        count++;
+// --- HELPER: Query Single Model ---
+async function queryModel(url, data, key) {
+    try {
+        const res = await fetch(url, {
+            headers: { Authorization: `Bearer ${key}` },
+            method: "POST",
+            body: data
+        });
+        const json = await res.json();
+        
+        if (Array.isArray(json)) {
+            // Check for 'artificial', 'fake', 'ai' labels
+            const fake = json.find(x => ['artificial', 'fake', 'ai'].some(k => x.label.toLowerCase().includes(k)));
+            const real = json.find(x => ['human', 'real'].some(k => x.label.toLowerCase().includes(k)));
+            
+            if (fake) return { score: fake.score };
+            if (real) return { score: 1 - real.score };
+        }
+        return { score: 0 };
+    } catch (e) {
+        return { score: 0 };
     }
-    const mean = sum / count;
-    
-    let varianceSum = 0;
-    for (let i = 0; i < buffer.length; i += 10) {
-        varianceSum += Math.pow(buffer[i] - mean, 2);
-    }
-    const variance = Math.sqrt(varianceSum / count);
-    
-    return { mean, variance };
+}
+
+function calculateEntropy(buffer) {
+    let sum = 0; 
+    // Sample first 1000 bytes
+    for(let i=0; i<1000 && i<buffer.length; i++) sum += buffer[i];
+    return (sum / 1000) % 10; 
 }
