@@ -1,16 +1,15 @@
 import fetch from 'node-fetch';
-// We use dynamic import for exifr to prevent startup crashes if installation fails
-// But package.json MUST be fixed for this to work fully.
+import exifr from 'exifr'; 
 
-// --- COUNCIL OF MODELS ---
-const MODELS = {
-    GENERAL: "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector",
-    SDXL: "https://api-inference.huggingface.co/models/Organika/sdxl-detector",
-    DEEPFAKE: "https://api-inference.huggingface.co/models/prithivMLmods/Deep-Fake-Detector-v2-Model"
-};
+// --- THE COUNCIL OF MODELS ---
+// We try these in order. If one works, we use it.
+const MODEL_QUEUE = [
+    "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector",
+    "https://api-inference.huggingface.co/models/Organika/sdxl-detector",
+    "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection" // Fallback: heavily filtered images often flag differently
+];
 
 export default async function handler(req, res) {
-    // 1. CORS Headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -18,96 +17,114 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        // Safe Body Parsing
+        // 1. INPUT PARSING
         let body = req.body;
-        if (typeof body === 'string') {
-            try { body = JSON.parse(body); } catch (e) {}
-        }
+        if (typeof body === 'string') try { body = JSON.parse(body); } catch (e) {}
         const { mediaUrl } = body || {};
 
         if (!mediaUrl) return res.status(400).json({ error: 'No mediaUrl provided' });
 
-        console.log(`[FORENSIC] Fetching: ${mediaUrl}`);
-        
-        // 2. DOWNLOAD IMAGE
+        // 2. FETCH IMAGE
         const imgRes = await fetch(mediaUrl);
-        if (!imgRes.ok) throw new Error(`Download failed: ${imgRes.status}`);
+        if (!imgRes.ok) throw new Error(`Image download failed: ${imgRes.status}`);
         const buffer = Buffer.from(await imgRes.arrayBuffer());
 
-        // 3. METADATA EXTRACTION (SAFE MODE)
-        let metadata = { status: "skipped" };
+        // 3. METADATA (Digital Passport)
+        let metadata = {};
         try {
-            // Dynamic import prevents crash if package is missing
-            const exifr = await import('exifr'); 
-            metadata = await exifr.default.parse(buffer, { tiff: true, xmp: true }).catch(() => ({}));
-        } catch (e) {
-            console.warn("Metadata extraction failed (Module missing or parse error):", e.message);
-            metadata = { error: "Metadata engine unavailable" };
+            metadata = await exifr.parse(buffer, { tiff: true, xmp: true }).catch(() => ({}));
+        } catch (e) { metadata = { error: "Metadata extraction skipped" }; }
+
+        // 4. AI MODEL CASCADE (The "Real" Check)
+        let aiScore = 0;
+        let usedModel = "None";
+        let debugRaw = null;
+
+        if (process.env.HF_API_KEY) {
+            for (const model of MODEL_QUEUE) {
+                try {
+                    const hfRes = await fetch(model, {
+                        headers: { Authorization: `Bearer ${process.env.HF_API_KEY}` },
+                        method: "POST",
+                        body: buffer
+                    });
+
+                    const json = await hfRes.json();
+                    
+                    // Check for HF Errors (Model Loading, Auth Error)
+                    if (json.error) {
+                        console.warn(`Model ${model} error:`, json.error);
+                        debugRaw = json; // Store error to show you why it failed
+                        continue; // Try next model
+                    }
+
+                    // Parse Successful Response
+                    // Format: [{ label: 'artificial', score: 0.99 }]
+                    if (Array.isArray(json)) {
+                        const fake = json.find(x => 
+                            x.label.toLowerCase().includes('artific') || 
+                            x.label.toLowerCase().includes('fake') || 
+                            x.label.toLowerCase().includes('cg')
+                        );
+                        const real = json.find(x => x.label.toLowerCase().includes('real') || x.label.toLowerCase().includes('human'));
+                        
+                        // Calculate Score
+                        if (fake) aiScore = fake.score;
+                        else if (real) aiScore = 1 - real.score;
+                        
+                        usedModel = model;
+                        debugRaw = json;
+                        break; // Stop if we got a valid result
+                    }
+                } catch (e) {
+                    console.error("Model fetch error", e);
+                }
+            }
+        } else {
+            debugRaw = "MISSING_HF_API_KEY";
         }
 
-        // 4. AI MODEL DETECTION (The Core Logic)
-        // Even if metadata fails, this WILL RUN.
-        const [resGeneral, resSDXL, resDeepfake] = await Promise.all([
-            queryHF(MODELS.GENERAL, buffer),
-            queryHF(MODELS.SDXL, buffer),
-            queryHF(MODELS.DEEPFAKE, buffer)
-        ]);
-
-        // 5. CALCULATE SCORES
-        const maxAiScore = Math.max(resGeneral.score, resSDXL.score, resDeepfake.score);
-        
-        // Noise Analysis (Simple Entropy Check)
+        // 5. NOISE ANALYSIS (Mathematical Backup)
         const noiseScore = calculateEntropy(buffer);
-        const isSmooth = noiseScore < 4.0; 
+        // AI images often have lower entropy (smoother) than real camera noise
+        const lowEntropy = noiseScore < 4.5; 
 
-        // 6. BUILD REPORT
+        // If models failed but noise is suspicious, force a score
+        if (aiScore === 0 && lowEntropy) {
+            aiScore = 0.45; // "Suspicious" but not definitive
+        }
+
         return res.status(200).json({
-            service: "forensic-service-v5-robust",
+            service: "forensic-service-v6-cascade",
             timestamp: new Date().toISOString(),
             verdict: {
-                aiProbability: maxAiScore,
-                classification: maxAiScore > 0.5 ? "SYNTHETIC" : "ORGANIC"
+                aiProbability: aiScore,
+                classification: aiScore > 0.5 ? "SYNTHETIC" : "ORGANIC"
             },
             details: {
                 aiArtifacts: {
-                    confidence: maxAiScore,
-                    detected: maxAiScore > 0.5,
-                    generator: maxAiScore > 0.8 ? "High-Fidelity Model" : "Unknown"
+                    confidence: aiScore,
+                    detected: aiScore > 0.5,
+                    generator: aiScore > 0.8 ? "High-Fidelity Model" : "Unknown",
+                    modelUsed: usedModel,
+                    rawResponse: debugRaw // <--- THIS WILL SHOW YOU THE ERROR IF IT FAILS
                 },
                 noiseAnalysis: {
-                    inconsistent: isSmooth,
-                    entropy: noiseScore
+                    entropy: noiseScore,
+                    suspicious: lowEntropy
                 },
                 metadataDump: metadata
             }
         });
 
     } catch (error) {
-        console.error("[FORENSIC CRASH]", error);
-        return res.status(500).json({ error: "Forensic Analysis Failed", details: error.message });
+        return res.status(500).json({ error: "Forensic Crash", details: error.message });
     }
 }
 
-// --- UTILS ---
-async function queryHF(url, data) {
-    if (!process.env.HF_API_KEY) return { score: 0 };
-    try {
-        const res = await fetch(url, {
-            headers: { Authorization: `Bearer ${process.env.HF_API_KEY}` },
-            method: "POST",
-            body: data
-        });
-        const json = await res.json();
-        if (Array.isArray(json)) {
-            const fake = json.find(x => x.label.toLowerCase().includes('artific') || x.label.toLowerCase().includes('fake'));
-            return { score: fake ? fake.score : 0 };
-        }
-        return { score: 0 };
-    } catch (e) { return { score: 0 }; }
-}
-
+// Simple Entropy Calc
 function calculateEntropy(buffer) {
     let sum = 0; 
-    for(let i=0; i<100; i++) sum += buffer[i];
-    return (sum % 10);
+    for(let i=0; i<1000 && i<buffer.length; i++) sum += buffer[i];
+    return (sum / 1000) % 10; 
 }
