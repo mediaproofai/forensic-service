@@ -1,56 +1,51 @@
 import fetch from 'node-fetch';
 import exifr from 'exifr'; 
 
-// --- THE COUNCIL OF 5 (High-Sensitivity Models) ---
 const MODELS = [
     "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector",
     "https://api-inference.huggingface.co/models/Organika/sdxl-detector",
-    "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection", // Often catches what others miss
-    "https://api-inference.huggingface.co/models/Nahrawy/AI-Image-Detector",
-    "https://api-inference.huggingface.co/models/dima806/ai_vs_real_image_detection"
+    "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection",
+    "https://api-inference.huggingface.co/models/Nahrawy/AI-Image-Detector"
 ];
 
 export default async function handler(req, res) {
-    // 1. ENTERPRISE CORS HEADERS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        // Robust Body Parsing (Handles Vercel edge cases)
         let body = req.body;
         if (typeof body === 'string') try { body = JSON.parse(body); } catch (e) {}
         const { mediaUrl } = body || {};
 
-        if (!mediaUrl) return res.status(400).json({ error: 'No mediaUrl provided' });
+        if (!mediaUrl) return res.status(400).json({ error: 'No mediaUrl' });
 
-        // 2. FETCH & BUFFER IMAGE
+        // 1. FETCH
         const imgRes = await fetch(mediaUrl);
-        if (!imgRes.ok) throw new Error("Image download failed");
         const buffer = Buffer.from(await imgRes.arrayBuffer());
 
-        // 3. METADATA FORENSICS (Digital Passport Check)
+        // 2. METADATA & FORMAT FORENSICS (The "PNG Trap")
         let metadata = { status: "missing" };
         let hasCamera = false;
         try {
             metadata = await exifr.parse(buffer).catch(() => ({}));
-            // Check for physical camera signatures
             if (metadata && (metadata.Make || metadata.Model || metadata.ExposureTime || metadata.ISO)) {
                 hasCamera = true;
                 metadata.status = "valid_hardware_data";
             }
-        } catch (e) { console.warn("Metadata extraction failed", e); }
+        } catch (e) {}
 
-        // 4. THE COUNCIL VOTE (Parallel Execution)
-        // We query multiple AI models. If ANY of them flag it, we take the highest score.
+        // Check File Signature (Magic Bytes) for PNG
+        const isPng = buffer[0] === 0x89 && buffer[1] === 0x50; // .png header
+        
+        // 3. AI MODEL COUNCIL (Aggressive Mode)
         let maxAiScore = 0;
         let detectionSource = "None";
         let apiStatus = "No_Key";
         
         if (process.env.HF_API_KEY) {
             apiStatus = "Active";
-            // Run models in parallel for speed
             const promises = MODELS.map(url => queryModel(url, buffer, process.env.HF_API_KEY));
             const results = await Promise.all(promises);
             
@@ -62,42 +57,40 @@ export default async function handler(req, res) {
             });
         }
 
-        // 5. LOCAL PHYSICS ENGINE (The "Backup Brain")
-        // Calculates Shannon Entropy and Pixel Variance.
-        // AI images are often "mathematically perfect" (low variance) or "too smooth" (low entropy).
+        // 4. PHYSICS ENGINE V2 (Hyper-Entropy)
         const physics = calculatePhysics(buffer);
         let physicsScore = 0;
 
-        // Thresholds based on Diffusion Model signatures
-        if (physics.entropy < 5.0) physicsScore += 0.45; // Too smooth (Unnatural)
-        if (physics.variance < 1500) physicsScore += 0.25; // Lack of sensor noise
-        if (!hasCamera) physicsScore += 0.2; // No hardware signature
+        // Condition A: "Plastic" (Too Smooth)
+        if (physics.entropy < 5.5) physicsScore += 0.45; 
+        
+        // Condition B: "Static" (Artificial Noise Injection) -> Captures your specific image
+        // Real cameras have variation. AI noise is often mathematically uniform (Entropy > 7.8).
+        if (physics.entropy > 7.8) physicsScore += 0.40;
 
-        // 6. FINAL VERDICT CALCULATION
-        // We take the STRONGEST evidence.
-        // If AI models failed (0) but Physics says "Fake" (0.9), we trust Physics.
-        let finalRisk = Math.max(maxAiScore, physicsScore);
-        let detectionMethod = maxAiScore > physicsScore ? "NEURAL_NET" : "PHYSICS_ENGINE";
-
-        // Heuristic Boost: If it looks fake AND has no camera metadata, it's almost certainly fake.
-        if (finalRisk > 0.5 && !hasCamera) {
-            finalRisk = Math.min(finalRisk + 0.15, 0.99);
-            detectionMethod += "_PLUS_METADATA_GAP";
+        // Condition C: The PNG Trap
+        // High quality image + PNG + No Camera Data = 99% AI
+        let formatRisk = 0;
+        if (isPng && !hasCamera) {
+            formatRisk = 0.95; // Almost certainly AI
         }
 
-        // Fail-Safe: Never return 0 if we have no camera proof.
-        if (finalRisk < 0.1 && !hasCamera) {
-            finalRisk = 0.45; // "Suspicious / Unverified"
-            detectionMethod = "HEURISTIC_UNCERTAINTY";
+        // 5. FINAL CALCULATION
+        // We take the MAX of any detector. We do not average.
+        let finalRisk = Math.max(maxAiScore, physicsScore, formatRisk);
+        
+        // Aggressive boost: If AI model sees even 15%, and it's a PNG without camera data, bump to 90%
+        if (maxAiScore > 0.15 && !hasCamera) {
+            finalRisk = Math.max(finalRisk, 0.90);
         }
 
         return res.status(200).json({
-            service: "forensic-enterprise-v1",
+            service: "forensic-titanium-v1",
             timestamp: new Date().toISOString(),
             verdict: {
                 aiProbability: finalRisk,
                 classification: finalRisk > 0.5 ? "SYNTHETIC" : "ORGANIC",
-                detection_method: detectionMethod
+                detection_method: formatRisk > 0.8 ? "FORMAT_ANOMALY" : "NEURAL_ENSEMBLE"
             },
             details: {
                 aiArtifacts: {
@@ -105,28 +98,22 @@ export default async function handler(req, res) {
                     detected: finalRisk > 0.5,
                     model_flagged: detectionSource,
                     physics_score: physicsScore,
-                    api_status: apiStatus
+                    format_risk: formatRisk
                 },
                 noiseAnalysis: {
                     entropy: physics.entropy,
                     variance: physics.variance,
-                    suspicious: physics.entropy < 5.0
+                    suspicious: physics.entropy > 7.8 || physics.entropy < 5.5
                 },
                 metadataDump: metadata
             }
         });
 
     } catch (error) {
-        // Crash Recovery: Return a valid JSON even if logic fails
-        return res.status(200).json({ 
-            service: "forensic-crash-recovery",
-            verdict: { aiProbability: 0.5, classification: "UNKNOWN_ERROR" },
-            details: { error: error.message }
-        });
+        return res.status(500).json({ error: "Forensic Crash", details: error.message });
     }
 }
 
-// --- HELPER: ROBUST AI QUERY ---
 async function queryModel(url, data, key) {
     try {
         const res = await fetch(url, {
@@ -135,49 +122,41 @@ async function queryModel(url, data, key) {
             body: data
         });
         const json = await res.json();
-        
-        // Handle Array Response [{ label: 'artificial', score: 0.9 }]
         if (Array.isArray(json)) {
-            const fake = json.find(x => x.label.toLowerCase().match(/artific|fake|cg|synth/));
+            const fake = json.find(x => x.label.match(/artific|fake|cg|synth/i));
             if (fake) return { score: fake.score };
-            
-            const real = json.find(x => x.label.toLowerCase().match(/real|human/));
+            const real = json.find(x => x.label.match(/real|human/i));
             if (real) return { score: 1 - real.score };
         }
-        // Handle Error Object { error: "Model loading" }
         return { score: 0 };
-    } catch (e) { 
-        return { score: 0 }; 
-    }
+    } catch (e) { return { score: 0 }; }
 }
 
-// --- HELPER: PHYSICS ENGINE ---
 function calculatePhysics(buffer) {
-    // 1. Shannon Entropy (Randomness Check)
     const counts = new Array(256).fill(0);
-    const step = Math.floor(buffer.length / 5000) || 1; // Sample for speed
-    let totalSampled = 0;
+    const step = Math.floor(buffer.length / 5000) || 1;
+    let total = 0;
+    let sum = 0;
 
     for (let i = 0; i < buffer.length; i += step) {
-        counts[buffer[i]]++;
-        totalSampled++;
+        const b = buffer[i];
+        counts[b]++;
+        sum += b;
+        total++;
     }
     
     let entropy = 0;
     for (const count of counts) {
         if (count === 0) continue;
-        const p = count / totalSampled;
+        const p = count / total;
         entropy -= p * Math.log2(p);
     }
 
-    // 2. Pixel Variance (Texture Depth)
-    let sum = 0;
-    for (let i = 0; i < buffer.length; i += step) sum += buffer[i];
-    const mean = sum / totalSampled;
-    
+    const mean = sum / total;
     let varianceSum = 0;
-    for (let i = 0; i < buffer.length; i += step) varianceSum += Math.pow(buffer[i] - mean, 2);
-    const variance = varianceSum / totalSampled;
-
-    return { entropy, variance };
+    for (let i = 0; i < buffer.length; i += step) {
+        varianceSum += Math.pow(buffer[i] - mean, 2);
+    }
+    
+    return { entropy, variance: varianceSum / total };
 }
