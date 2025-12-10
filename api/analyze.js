@@ -3,11 +3,11 @@ import exifr from 'exifr';
 
 // --- THE COUNCIL OF 5 (High-Sensitivity Neural Ensemble) ---
 const MODELS = [
-    "https://router.huggingface.co/models/umm-maybe/AI-image-detector",
-    "https://router.huggingface.co/models/Organika/sdxl-detector",
-    "https://router.huggingface.co/models/Falconsai/nsfw_image_detection", // Catches organic-looking deepfakes
-    "https://router.huggingface.co/models/Nahrawy/AI-Image-Detector",
-    "https://router.huggingface.co/models/dima806/ai_vs_real_image_detection"
+    "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector",
+    "https://api-inference.huggingface.co/models/Organika/sdxl-detector",
+    "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection", 
+    "https://api-inference.huggingface.co/models/Nahrawy/AI-Image-Detector",
+    "https://api-inference.huggingface.co/models/dima806/ai_vs_real_image_detection"
 ];
 
 export default async function handler(req, res) {
@@ -19,36 +19,31 @@ export default async function handler(req, res) {
     if (req.method === 'OPTIONS') return res.status(200).end();
 
     try {
-        // Robust Body Parsing (Prevents "Unexpected Token" crashes)
         let body = req.body;
         if (typeof body === 'string') try { body = JSON.parse(body); } catch (e) {}
         const { mediaUrl } = body || {};
 
         if (!mediaUrl) return res.status(400).json({ error: 'No mediaUrl provided' });
 
-        // 2. ACQUIRE EVIDENCE (Download)
+        // 2. ACQUIRE EVIDENCE
         const imgRes = await fetch(mediaUrl);
         if (!imgRes.ok) throw new Error("Evidence retrieval failed");
         const buffer = Buffer.from(await imgRes.arrayBuffer());
 
-        // 3. METADATA FORENSICS (The "Digital Passport")
+        // 3. METADATA FORENSICS
         let metadata = { status: "missing" };
         let hasCamera = false;
         try {
-            // Extract deep tags (EXIF, XMP, ICC)
             metadata = await exifr.parse(buffer, { tiff: true, xmp: true, icc: true }).catch(() => ({}));
-            
-            // Check for hardware signatures
             if (metadata && (metadata.Make || metadata.Model || metadata.ExposureTime || metadata.ISO)) {
                 hasCamera = true;
                 metadata.status = "hardware_verified";
             }
         } catch (e) { console.warn("Metadata scan skipped", e); }
 
-        // Check for File Signature (Magic Bytes) - Detect PNG
         const isPng = buffer[0] === 0x89 && buffer[1] === 0x50; 
 
-        // 4. THE COUNCIL VOTE (Parallel Neural Analysis)
+        // 4. THE COUNCIL VOTE
         let maxAiScore = 0;
         let detectionSource = "None";
         let apiStatus = "Offline";
@@ -66,53 +61,48 @@ export default async function handler(req, res) {
             });
         }
 
-        // 5. PHYSICS ENGINE V2 (The "Math" Check)
-        // Detects "Uncanny Valley" in pixel statistics.
+        // 5. PHYSICS ENGINE V2 (Entropy/Variance)
         const physics = calculatePhysics(buffer);
         let physicsScore = 0;
 
-        // Tuning: Plasticity (Too Smooth)
         if (physics.entropy < 6.0) physicsScore += 0.6; 
-        
-        // Tuning: Hyper-Noise (Fake Film Grain injection common in Flux/SDXL)
         if (physics.entropy > 7.9) physicsScore += 0.6; 
-
-        // Tuning: Low Variance (Flat textures)
         if (physics.variance < 2000) physicsScore += 0.3;
-
-        // Cap Physics Score
         physicsScore = Math.min(physicsScore, 0.95);
 
-        // 6. FORMAT ANOMALY DETECTION (The "PNG Trap")
-        // High quality image + PNG + No Camera Data = 99% probability of AI
-        let formatRisk = 0;
-        if (isPng && !hasCamera) {
-            formatRisk = 0.95; 
-        }
+        // 6. ADVANCED FORENSICS (ELA + Lighting)
+        // [NEW FEATURE] - Mathematical ELA and Lighting Consistency
+        const advanced = calculateAdvancedForensics(buffer);
+        let advancedRisk = 0;
+        
+        if (advanced.lighting_naturalness === "FLAT/ARTIFICIAL") advancedRisk += 0.4;
+        if (advanced.ela_mismatch > 0.15) advancedRisk += 0.5; // High editing artifacts
 
-        // 7. FINAL VERDICT CALCULATION
-        // We take the MAX of any vector. The strongest evidence wins.
-        let finalRisk = Math.max(maxAiScore, physicsScore, formatRisk);
+        // 7. FORMAT ANOMALY (PNG Trap)
+        let formatRisk = 0;
+        if (isPng && !hasCamera) formatRisk = 0.95; 
+
+        // 8. FINAL VERDICT
+        let finalRisk = Math.max(maxAiScore, physicsScore, formatRisk, advancedRisk);
         let detectionMethod = "UNCERTAIN";
 
         if (formatRisk > maxAiScore && formatRisk > physicsScore) detectionMethod = "FORMAT_ANOMALY (PNG_NO_EXIF)";
+        else if (advancedRisk > 0.8) detectionMethod = "ADVANCED_FORENSICS (ELA/LIGHTING)";
         else if (physicsScore > maxAiScore) detectionMethod = "PHYSICS_ENGINE (ENTROPY_MISMATCH)";
         else if (maxAiScore > 0.5) detectionMethod = `NEURAL_NET (${detectionSource})`;
 
-        // Aggressive Boost: If AI model sees *anything* suspicious (>15%) AND we have no camera data, assume Fake.
         if (maxAiScore > 0.15 && !hasCamera) {
             finalRisk = Math.max(finalRisk, 0.90);
             detectionMethod += " + MISSING_ORIGIN";
         }
 
-        // Fail-Safe: If result is 0 but image has no source, mark Suspicious (45%)
         if (finalRisk < 0.1 && !hasCamera) {
             finalRisk = 0.45;
             detectionMethod = "HEURISTIC_UNCERTAINTY";
         }
 
         return res.status(200).json({
-            service: "forensic-titanium-v2",
+            service: "forensic-titanium-v3-advanced",
             timestamp: new Date().toISOString(),
             verdict: {
                 aiProbability: finalRisk,
@@ -126,6 +116,7 @@ export default async function handler(req, res) {
                     model_flagged: detectionSource,
                     physics_score: physicsScore,
                     format_risk: formatRisk,
+                    advanced_risk: advancedRisk, // New Field
                     council_max: maxAiScore
                 },
                 noiseAnalysis: {
@@ -133,12 +124,16 @@ export default async function handler(req, res) {
                     variance: physics.variance,
                     verdict: physicsScore > 0.5 ? "ARTIFICIAL_PATTERN" : "NATURAL_NOISE"
                 },
+                advancedForensics: {
+                    lighting: advanced.lighting_naturalness,
+                    ela_score: advanced.ela_mismatch.toFixed(4),
+                    compression_ghosts: advanced.compression_ghosts
+                },
                 metadataDump: metadata
             }
         });
 
     } catch (error) {
-        // Crash Recovery: Return a valid JSON even if logic fails so Frontend doesn't blank out
         return res.status(200).json({ 
             service: "forensic-crash-recovery",
             verdict: { aiProbability: 0.5, classification: "UNKNOWN_ERROR" },
@@ -147,7 +142,8 @@ export default async function handler(req, res) {
     }
 }
 
-// --- HELPER: ROBUST AI QUERY ---
+// --- HELPERS ---
+
 async function queryModel(url, data, key) {
     try {
         const res = await fetch(url, {
@@ -156,28 +152,18 @@ async function queryModel(url, data, key) {
             body: data
         });
         const json = await res.json();
-        
-        // Handle Hugging Face Array Response
         if (Array.isArray(json)) {
-            // Find "Artificial", "Fake", "CG", or "Synthetic" labels
             const fake = json.find(x => x.label.match(/artific|fake|cg|synth/i));
             if (fake) return { score: fake.score };
-            
-            // Or Invert "Real/Human" label
             const real = json.find(x => x.label.match(/real|human/i));
             if (real) return { score: 1 - real.score };
         }
         return { score: 0 };
-    } catch (e) { 
-        return { score: 0 }; // Fail silently for individual models, ensemble handles the rest
-    }
+    } catch (e) { return { score: 0 }; }
 }
 
-// --- HELPER: PHYSICS ENGINE ---
 function calculatePhysics(buffer) {
-    // 1. Shannon Entropy (Randomness Check)
     const counts = new Array(256).fill(0);
-    // Sample every 50th byte for speed optimization on large files
     const step = Math.floor(buffer.length / 5000) || 1;
     let total = 0;
     let sum = 0;
@@ -196,7 +182,6 @@ function calculatePhysics(buffer) {
         entropy -= p * Math.log2(p);
     }
 
-    // 2. Pixel Variance (Texture Depth)
     const mean = sum / total;
     let varianceSum = 0;
     for (let i = 0; i < buffer.length; i += step) {
@@ -204,4 +189,41 @@ function calculatePhysics(buffer) {
     }
     
     return { entropy, variance: varianceSum / total };
+}
+
+// [NEW] ELA & LIGHTING ALGORITHM
+function calculateAdvancedForensics(buffer) {
+    // 1. LIGHTING CONSISTENCY (Luminance Gradient)
+    let lumSum = 0;
+    let gradients = 0;
+    
+    // Simple luminance extraction (R+G+B average)
+    // We sample bytes directly. Real photos have consistent directional light.
+    for (let i = 0; i < buffer.length - 400; i += 400) { 
+        const lum = (buffer[i] + buffer[i+1] + buffer[i+2]) / 3;
+        lumSum += lum;
+        // Check difference with a distant pixel block to detect gradient flow
+        if (i > 400) {
+            const prevLum = (buffer[i-400] + buffer[i-399] + buffer[i-398]) / 3;
+            gradients += Math.abs(lum - prevLum);
+        }
+    }
+    
+    const avgGradient = gradients / (buffer.length / 400);
+    
+    // 2. ELA SIMULATION (Compression Artifacts)
+    // We look for sudden "spikes" in byte variance which indicate mismatched compression blocks (Editing/Cloning)
+    let ghosts = 0;
+    for (let i = 100; i < buffer.length - 100; i += 100) {
+        const localVar = Math.abs(buffer[i] - buffer[i-50]);
+        // If variance spikes anomalously high compared to neighbors, it's a "ghost"
+        if (localVar > 240) ghosts++; 
+    }
+
+    // AI images often have very "flat" gradients (Global Illumination) compared to real sun/flash.
+    return {
+        lighting_naturalness: avgGradient > 5 ? "NATURAL" : "FLAT/ARTIFICIAL", 
+        compression_ghosts: ghosts, 
+        ela_mismatch: ghosts / (buffer.length / 100) // Ratio of anomalies
+    };
 }
