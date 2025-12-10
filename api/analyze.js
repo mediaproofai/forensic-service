@@ -3,11 +3,11 @@ import exifr from 'exifr';
 
 // --- THE COUNCIL OF 5 (High-Sensitivity Neural Ensemble) ---
 const MODELS = [
-    "https://api-inference.huggingface.co/models/umm-maybe/AI-image-detector",
-    "https://api-inference.huggingface.co/models/Organika/sdxl-detector",
-    "https://api-inference.huggingface.co/models/Falconsai/nsfw_image_detection", // Catches organic-looking deepfakes
-    "https://api-inference.huggingface.co/models/Nahrawy/AI-Image-Detector",
-    "https://api-inference.huggingface.co/models/dima806/ai_vs_real_image_detection"
+    "https://router.huggingface.co/models/umm-maybe/AI-image-detector",
+    "https://router.huggingface.co/models/Organika/sdxl-detector",
+    "https://router.huggingface.co/models/Falconsai/nsfw_image_detection", // Catches organic-looking deepfakes
+    "https://router.huggingface.co/models/Nahrawy/AI-Image-Detector",
+    "https://router.huggingface.co/models/dima806/ai_vs_real_image_detection"
 ];
 
 export default async function handler(req, res) {
